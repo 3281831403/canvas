@@ -133,9 +133,9 @@ func (r *Gio) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 	}
 
 	if style.HasStroke() {
+		// dash lengths are in user units (millimeters); the path transformation applies the view scale
 		if style.IsDashed() {
-			dashOffset, dashes := canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
-			path = path.Dash(dashOffset, dashes...)
+			path = path.Dash(style.DashOffset, style.Dashes...)
 		}
 		path = path.Stroke(style.StrokeWidth, style.StrokeCapper, style.StrokeJoiner, canvas.Tolerance)
 		r.renderPath(path.Transform(m), style.Stroke)

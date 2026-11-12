@@ -192,7 +192,8 @@ func (r *TeX) RenderPath(path *canvas.Path, style canvas.Style, m canvas.Matrix)
 	if m.IsSimilarity() {
 		scale := math.Sqrt(math.Abs(m.Det()))
 		style.StrokeWidth *= scale
-		style.DashOffset, style.Dashes = canvas.ScaleDash(style.StrokeWidth, style.DashOffset, style.Dashes)
+		// dash lengths are in user units (millimeters) and only follow the view transformation, never the stroke width
+		style.DashOffset, style.Dashes = canvas.ScaleDash(scale, style.DashOffset, style.Dashes)
 	} else {
 		strokeUnsupported = true
 	}

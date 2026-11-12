@@ -131,3 +131,92 @@ func TestSplitAlpha(t *testing.T) {
 		test.Float(t, opacity, tt.opacity)
 	}
 }
+
+// TestSVGDashUnits verifies that dash lengths are in user units (millimeters): they follow the view
+// transformation but never the stroke width. It also checks export/import round-trip stability.
+func TestSVGDashUnits(t *testing.T) {
+	dashLine := func(strokeWidth float64) func(*canvas.Context) {
+		return func(ctx *canvas.Context) {
+			ctx.SetFillColor(canvas.Transparent)
+			ctx.SetStrokeColor(canvas.Black)
+			ctx.SetStrokeWidth(strokeWidth)
+			ctx.SetDashes(0.5, 4.0, 2.0)
+			ctx.DrawPath(2, 10, canvas.Line(96, 0))
+		}
+	}
+
+	s1 := renderSVG(dashLine(1.0))
+	s2 := renderSVG(dashLine(2.0))
+	s5 := renderSVG(dashLine(5.0))
+	if !strings.Contains(s1, "stroke-dasharray:4 2") || !strings.Contains(s1, "stroke-dashoffset:.5") {
+		t.Fatalf("unexpected dash output: %s", s1)
+	}
+	test.String(t, extractDash(s2), extractDash(s1))
+	test.String(t, extractDash(s5), extractDash(s1))
+	// stroke width does change, but dashes do not
+	if !strings.Contains(s2, "stroke-width:2") {
+		t.Fatalf("stroke width not emitted: %s", s2)
+	}
+
+	// dash follows the view scale
+	c := canvas.New(100, 40)
+	ctx := canvas.NewContext(c)
+	ctx.SetView(canvas.Identity.Scale(2.0, 2.0))
+	ctx.SetFillColor(canvas.Transparent)
+	ctx.SetStrokeColor(canvas.Black)
+	ctx.SetStrokeWidth(1.0)
+	ctx.SetDashes(0, 4, 2)
+	ctx.DrawPath(1, 5, canvas.Line(48, 0))
+	buf := &bytes.Buffer{}
+	r := New(buf, 100, 40, nil)
+	c.RenderTo(r)
+	r.Close()
+	test.That(t, strings.Contains(buf.String(), "stroke-dasharray:8 4"), buf.String())
+
+	// export -> parse -> export must keep the dasharray stable over multiple round trips
+	c0 := canvas.New(100, 20)
+	cx0 := canvas.NewContext(c0)
+	cx0.SetFillColor(canvas.Transparent)
+	cx0.SetStrokeColor(canvas.Black)
+	cx0.SetStrokeWidth(2.0)
+	cx0.SetDashes(0.5, 4, 2)
+	cx0.DrawPath(2, 10, canvas.Line(96, 0))
+
+	prev := ""
+	cur := c0
+	for i := 0; i < 3; i++ {
+		buf.Reset()
+		rw := New(buf, cur.W, cur.H, nil)
+		cur.RenderTo(rw)
+		rw.Close()
+		out := buf.String()
+		if 0 < i {
+			test.String(t, extractDash(out), prev)
+		}
+		prev = extractDash(out)
+		parsed, err := canvas.ParseSVG(strings.NewReader(out))
+		test.Error(t, err)
+		cur = parsed
+	}
+	test.String(t, prev, "stroke-dasharray:4 2;stroke-dashoffset:.5")
+}
+
+func extractDash(s string) string {
+	i := strings.Index(s, "stroke-dasharray:")
+	if i < 0 {
+		return ""
+	}
+	rest := s[i:]
+	end := strings.IndexAny(rest, "\";")
+	if end < 0 {
+		end = len(rest)
+	}
+	dash := rest[:end]
+	if j := strings.Index(s, "stroke-dashoffset:"); j >= 0 {
+		o := s[j:]
+		if e := strings.IndexAny(o, "\";"); e >= 0 {
+			dash += ";" + o[:e]
+		}
+	}
+	return dash
+}

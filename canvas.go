@@ -155,6 +155,7 @@ var (
 	SparselyDashdotted = []float64{3.0, 4.0, 1.0, 4.0}
 )
 
+// ScaleDash scales the dash offset and dash pattern by scale. Dash lengths are expressed in user units (millimeters) and are only scaled by the view transformation, never by the stroke width.
 func ScaleDash(scale float64, offset float64, d []float64) (float64, []float64) {
 	d2 := make([]float64, len(d))
 	for i := range d {

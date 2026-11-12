@@ -149,3 +149,46 @@ func TestPDFMetadata(t *testing.T) {
 	test.That(t, strings.Contains(out, "/Author(d4)"), `could not find "/Author (d4)" in output`)
 	test.That(t, strings.Contains(out, "/Creator(e5)"), `could not find "/Creator (e5)" in output`)
 }
+
+// TestPDFDashUnits verifies that the PDF dash array is expressed in millimeters (user space) and does
+// not scale with the stroke width, only with the view transformation.
+func TestPDFDashUnits(t *testing.T) {
+	render := func(strokeWidth float64) string {
+		c := canvas.New(100, 20)
+		ctx := canvas.NewContext(c)
+		ctx.SetFillColor(canvas.Transparent)
+		ctx.SetStrokeColor(canvas.Black)
+		ctx.SetStrokeWidth(strokeWidth)
+		ctx.SetDashes(0.5, 4.0, 2.0)
+		ctx.DrawPath(2, 10, canvas.Line(96, 0))
+		buf := &bytes.Buffer{}
+		r := New(buf, c.W, c.H, &Options{Compress: false})
+		c.RenderTo(r)
+		test.Error(t, r.Close())
+		return buf.String()
+	}
+	s1 := render(1.0)
+	s2 := render(2.0)
+	if !strings.Contains(s1, "[4 2] .5 d") {
+		t.Fatalf("missing mm dash array: %s", s1)
+	}
+	// dash array identical regardless of stroke width
+	if extractPDFDash(s1) != extractPDFDash(s2) {
+		t.Fatalf("dash array changed with stroke width: %q vs %q", extractPDFDash(s1), extractPDFDash(s2))
+	}
+	if !strings.Contains(s2, "2 w") {
+		t.Fatalf("stroke width not applied: %s", s2)
+	}
+}
+
+func extractPDFDash(s string) string {
+	i := strings.Index(s, "[")
+	if i < 0 {
+		return ""
+	}
+	j := strings.Index(s[i:], " d")
+	if j < 0 {
+		return ""
+	}
+	return s[i : i+j]
+}

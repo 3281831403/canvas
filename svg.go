@@ -50,6 +50,7 @@ type svgCanvas struct {
 	c                       *Canvas
 	ctx                     *Context
 	width, height, diagonal float64
+	userDiagonal            float64
 }
 
 type svgParser struct {
@@ -86,15 +87,18 @@ func (svg *svgParser) parseViewBox(attrWidth, attrHeight, attrViewBox string) (f
 			}
 		}
 	}
+	mmPerPx := 25.4 / 96.0
 	if attrWidth != "" && !strings.HasSuffix(attrWidth, "%") {
-		width = svg.parseDimension(attrWidth, 1.0)
+		// parseDimension returns CSS pixels, convert to canvas millimeters
+		width = svg.parseDimension(attrWidth, 1.0) * mmPerPx
 	} else {
-		width = viewbox[2] * 25.4 / 96.0
+		width = viewbox[2] * mmPerPx
 	}
 	if attrHeight != "" && !strings.HasSuffix(attrHeight, "%") {
-		height = svg.parseDimension(attrHeight, 1.0)
+		// parseDimension returns CSS pixels, convert to canvas millimeters
+		height = svg.parseDimension(attrHeight, 1.0) * mmPerPx
 	} else {
-		height = viewbox[3] * 25.4 / 96.0
+		height = viewbox[3] * mmPerPx
 	}
 	return width, height, viewbox
 }
@@ -109,6 +113,9 @@ func (svg *svgParser) init(width, height float64, viewbox [4]float64) {
 	if 0.0 < viewbox[2] && 0.0 < viewbox[3] {
 		m := Identity.Scale(width/viewbox[2], height/viewbox[3]).Translate(-viewbox[0], -viewbox[1])
 		svg.ctx.SetView(m)
+		svg.userDiagonal = math.Sqrt((viewbox[2]*viewbox[2] + viewbox[3]*viewbox[3]) / 2.0)
+	} else {
+		svg.userDiagonal = math.Sqrt((svg.width*svg.width + svg.height*svg.height) / 2.0)
 	}
 	svg.ctx.SetStrokeJoiner(MiterJoiner{BevelJoin, svgDefaultState.strokeMiterLimit})
 	svg.state = svgDefaultState
@@ -289,6 +296,51 @@ func (svg *svgParser) parsePoints(v string) []float64 {
 				svg.err = parse.NewErrorLexer(svg.z, "bad number array: %w: %s", err, v)
 			}
 			vals = append(vals, val)
+		}
+	}
+	return vals
+}
+
+// parseDashLength parses a single SVG dash length into canvas user units.
+// Unitless values and px values are CSS user units and are returned as-is (the active view transformation
+// maps them onto millimeters), absolute units (mm, cm, in, ...) are converted to millimeters and divided
+// by the view scale, and percentages are resolved against the viewport diagonal in user units.
+func (svg *svgParser) parseDashLength(item string) float64 {
+	nn, _ := parse.Dimension([]byte(item))
+	num, err := strconv.ParseFloat(item[:nn], 64)
+	if err != nil {
+		if svg.err == nil {
+			svg.err = parse.NewErrorLexer(svg.z, "bad dash length: %w: %s", err, item)
+		}
+		return 0.0
+	}
+	dim := strings.ToLower(item[nn:])
+	if dim == "" || dim == "px" {
+		// CSS user units; the view transformation converts them to millimeters
+		return num
+	}
+	if dim == "%" {
+		// percentages are relative to the normalized diagonal of the viewport in user units
+		return num / 100.0 * svg.userDiagonal
+	}
+	// absolute units: parseDimension returns CSS pixels, convert to millimeters
+	mm := svg.parseDimension(item, svg.diagonal) * 25.4 / 96.0
+	// store in user units so the view transformation restores the absolute length
+	scale := math.Sqrt(math.Abs(svg.ctx.View().Det()))
+	if scale == 0.0 {
+		scale = 1.0
+	}
+	return mm / scale
+}
+
+// parseDashArray parses an SVG stroke-dasharray into dash lengths in canvas user units.
+func (svg *svgParser) parseDashArray(v string) []float64 {
+	vals := []float64{}
+	for _, item := range strings.FieldsFunc(v, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	}) {
+		if 0 < len(item) {
+			vals = append(vals, svg.parseDashLength(item))
 		}
 	}
 	return vals
@@ -969,12 +1021,12 @@ func (svg *svgParser) setAttribute(key, val string) {
 	case "stroke-width":
 		svg.ctx.SetStrokeWidth(svg.parseDimension(val, svg.diagonal))
 	case "stroke-dashoffset":
-		svg.ctx.Style.DashOffset = svg.parseDimension(val, svg.diagonal)
+		svg.ctx.Style.DashOffset = svg.parseDashLength(val)
 	case "stroke-dasharray":
 		if val == "none" {
 			svg.ctx.Style.Dashes = []float64{}
 		} else {
-			svg.ctx.Style.Dashes = svg.parsePoints(val)
+			svg.ctx.Style.Dashes = svg.parseDashArray(val)
 		}
 	case "stroke-linecap":
 		if val == "butt" {
