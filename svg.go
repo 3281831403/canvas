@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -61,9 +62,11 @@ type svgParser struct {
 	stateStack []svgState
 	state      svgState
 
-	cssRules []cssRule // from <style>
-	defs     map[string]svgDef
-	fonts    map[string]*FontFamily
+	cssRules      []cssRule // from <style>, in document order
+	cssIndex      cssRuleIndex
+	cssCandidates []int
+	defs          map[string]svgDef
+	fonts         map[string]*FontFamily
 
 	// active definitions for attributes
 	activeDefs map[string]svgDef
@@ -423,14 +426,19 @@ func (svg *svgParser) parseTag(l *xml.Lexer) *svgTag {
 			}
 
 			// Handle <style> being nested in <defs>. Adobe Illustrator
-			// does this, for example.
+			// does this, for example. Its rules were already parsed by
+			// parseStyleSheets, so only skip over the element here.
 			if name == "style" {
-				tt, data = l.Next()
-				if tt == xml.TextToken {
-					svg.parseStyle(data)
-					tt, data = l.Next()
-				} else {
-					svg.err = parse.NewErrorLexer(svg.z, "Bad style tag")
+				if tt != xml.StartTagCloseVoidToken {
+					for tt != xml.StartTagCloseToken && tt != xml.ErrorToken {
+						tt, data = l.Next()
+					}
+					for {
+						tt, data = l.Next()
+						if tt == xml.EndTagToken || tt == xml.ErrorToken {
+							break
+						}
+					}
 				}
 				break
 			}
@@ -769,6 +777,51 @@ func (svg *svgParser) parseDefs(l *xml.Lexer) {
 	}
 }
 
+// parseStyleSheets scans the document for <style> elements and parses all of them before
+// any rendering takes place. This makes style sheets apply to the entire document instead
+// of only to the elements that follow them. The input is rewound afterwards so that the
+// regular, stateful parse starts from the beginning again.
+func (svg *svgParser) parseStyleSheets() {
+	if !bytes.Contains(svg.z.Bytes(), []byte("<style")) {
+		return // avoid an extra lexing pass for documents without style sheets
+	}
+
+	l := xml.NewLexer(svg.z)
+	for {
+		tt, data := l.Next()
+		if tt == xml.ErrorToken {
+			break
+		} else if tt == xml.StartTagToken && bytes.Equal(data[1:], []byte("style")) {
+			svg.parseStyleElement(l)
+		}
+	}
+	svg.z.Reset()
+}
+
+// parseStyleElement parses the content of a <style> element and leaves the lexer just past
+// its end tag.
+func (svg *svgParser) parseStyleElement(l *xml.Lexer) {
+	// skip the attributes and the closing bracket of the start tag
+	tt, _ := l.Next()
+	for tt != xml.StartTagCloseToken && tt != xml.StartTagCloseVoidToken && tt != xml.ErrorToken {
+		tt, _ = l.Next()
+	}
+	if tt != xml.StartTagCloseToken {
+		return // self-closing or malformed style tag
+	}
+
+	tt, data := l.Next()
+	if tt == xml.CDATAToken {
+		data = l.Text()
+	} else if tt != xml.TextToken {
+		return // empty style element
+	}
+	svg.parseStyle(data)
+	for tt != xml.EndTagToken && tt != xml.ErrorToken {
+		tt, _ = l.Next()
+	}
+}
+
 func (svg *svgParser) parseStyle(b []byte) {
 	p := css.NewParser(parse.NewInputBytes(b), false)
 	selectors := []cssSelector{}
@@ -825,11 +878,14 @@ func (svg *svgParser) parseStyle(b []byte) {
 				}
 				props = append(props, cssProperty{string(data), val.String()})
 			}
-			svg.cssRules = append(svg.cssRules, cssRule{
+			rule := cssRule{
+				index:     len(svg.cssRules),
 				selectors: selectors,
 				props:     props,
-			})
-			selectors = selectors[:0:0]
+			}
+			svg.cssRules = append(svg.cssRules, rule)
+			svg.cssIndex.add(rule)
+			selectors = nil
 		}
 	}
 }
@@ -853,8 +909,11 @@ func (svg *svgParser) parseStyleAttribute(style string) []cssProperty {
 }
 
 func (svg *svgParser) setStyling(props []cssProperty) {
-	// apply CSS from <style>
-	for _, rule := range svg.cssRules {
+	// apply CSS from <style>. Rules are indexed by their rightmost selector so that
+	// only rules that can possibly match the current element are evaluated.
+	svg.cssCandidates = svg.cssIndex.candidates(svg.elemStack[len(svg.elemStack)-1], svg.cssCandidates)
+	for _, i := range svg.cssCandidates {
+		rule := svg.cssRules[i]
 		// TODO: this is in order of appearance, use selector specificity/precedence?
 		if rule.AppliesTo(svg.elemStack) {
 			for _, prop := range rule.props {
@@ -1110,13 +1169,18 @@ func ParseSVG(r io.Reader) (*Canvas, error) {
 	z := parse.NewInput(r)
 	defer z.Restore()
 
-	l := xml.NewLexer(z)
 	svg := svgParser{
 		z:          z,
 		defs:       map[string]svgDef{},
 		fonts:      map[string]*FontFamily{},
 		activeDefs: map[string]svgDef{},
 	}
+
+	// Parse all style sheets upfront so that they apply to the whole document, regardless
+	// of whether they occur before or after the elements they style.
+	svg.parseStyleSheets()
+
+	l := xml.NewLexer(z)
 	for {
 		tt, data := l.Next()
 		switch tt {
@@ -1146,18 +1210,17 @@ func ParseSVG(r io.Reader) (*Canvas, error) {
 
 			// handle special tags
 			if tag == "style" {
-				tt, data = l.Next()
-				if tt == xml.CDATAToken {
-					svg.parseStyle(l.Text())
-					tt, data = l.Next() // end token
-					for tt != xml.EndTagToken {
-						tt, data = l.Next() // end token
+				// already parsed by parseStyleSheets, skip the element and its content
+				if tt != xml.StartTagCloseVoidToken {
+					for tt != xml.StartTagCloseToken && tt != xml.ErrorToken {
+						tt, _ = l.Next()
 					}
-				} else if tt == xml.TextToken {
-					svg.parseStyle(data)
-					tt, data = l.Next() // end token
-				} else {
-					return svg.c, fmt.Errorf("bad style tag")
+					for {
+						tt, _ = l.Next()
+						if tt == xml.EndTagToken || tt == xml.ErrorToken {
+							break
+						}
+					}
 				}
 				break
 			} else if tag == "defs" {
@@ -1351,8 +1414,100 @@ func (prop cssProperty) String() string {
 }
 
 type cssRule struct {
+	index     int
 	selectors []cssSelector
 	props     []cssProperty
+}
+
+// cssRuleIndex narrows down the set of rules that may apply to an element. Each rule is
+// indexed by the rightmost compound selector of every selector in its selector list, which
+// is the only part of a selector that has to match the element itself. Selectors that can
+// match any element (e.g. `*` or `.cls` nested as `g *`) are always candidates.
+type cssRuleIndex struct {
+	byID    map[string][]int
+	byClass map[string][]int
+	byTag   map[string][]int
+	byAttr  map[string][]int
+	all     []int
+}
+
+func (index *cssRuleIndex) add(rule cssRule) {
+	for _, sels := range rule.selectors {
+		if len(sels) == 0 {
+			continue
+		}
+		node := sels[len(sels)-1]
+		if !index.addAttrs(rule.index, node.attrs) && (node.typ == "" || node.typ == "*") {
+			index.all = append(index.all, rule.index)
+		} else if node.typ != "" && node.typ != "*" {
+			if index.byTag == nil {
+				index.byTag = map[string][]int{}
+			}
+			index.byTag[node.typ] = append(index.byTag[node.typ], rule.index)
+		}
+	}
+}
+
+// addAttrs indexes the rule by the id, class, or attribute selectors of the compound
+// selector and reports whether it added at least one entry.
+func (index *cssRuleIndex) addAttrs(rule int, attrs []cssAttrSelector) bool {
+	indexed := false
+	for _, attr := range attrs {
+		switch {
+		case attr.attr == "id" && attr.op == '=':
+			if index.byID == nil {
+				index.byID = map[string][]int{}
+			}
+			index.byID[attr.val] = append(index.byID[attr.val], rule)
+		case attr.attr == "class" && attr.op == '~':
+			if index.byClass == nil {
+				index.byClass = map[string][]int{}
+			}
+			index.byClass[attr.val] = append(index.byClass[attr.val], rule)
+		default:
+			if index.byAttr == nil {
+				index.byAttr = map[string][]int{}
+			}
+			index.byAttr[attr.attr] = append(index.byAttr[attr.attr], rule)
+		}
+		indexed = true
+	}
+	return indexed
+}
+
+// candidates appends the indices of all rules that may apply to elem to buf and returns
+// the extended slice. Rules with a selector list contribute once per selector, and a rule
+// may match several classes or attributes, so the result is deduplicated and sorted in
+// rule order, which is the order in which the rules must be applied.
+func (index *cssRuleIndex) candidates(elem svgElem, buf []int) []int {
+	buf = buf[:0]
+	buf = append(buf, index.all...)
+	if elem.id != "" {
+		buf = append(buf, index.byID[elem.id]...)
+	}
+	for class := range strings.FieldsSeq(elem.attrs["class"]) {
+		buf = append(buf, index.byClass[class]...)
+	}
+	buf = append(buf, index.byTag[elem.tag]...)
+	for attr := range elem.attrs {
+		buf = append(buf, index.byAttr[attr]...)
+	}
+	if len(buf) == 0 {
+		return buf
+	}
+
+	// deduplicate while preserving rule order
+	slices.Sort(buf)
+	n := 0
+	prev := -1
+	for _, i := range buf {
+		if i != prev {
+			buf[n] = i
+			n++
+			prev = i
+		}
+	}
+	return buf[:n]
 }
 
 func (rule cssRule) AppliesTo(elems []svgElem) bool {
