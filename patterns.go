@@ -82,18 +82,19 @@ func (p *HatchPattern) Transform(view Matrix) Pattern {
 	return p
 }
 
-// SetColorSpace sets the color space. Automatically called by the rasterizer.
+// SetColorSpace returns a copy of the pattern in the given color space, leaving the pattern itself unmodified. Automatically called by the rasterizer.
 func (p *HatchPattern) SetColorSpace(colorSpace ColorSpace) Pattern {
 	if _, ok := colorSpace.(LinearColorSpace); ok {
 		return p
 	}
 
-	if p.Fill.IsGradient() {
-		p.Fill.Gradient.SetColorSpace(colorSpace)
-	} else if p.Fill.IsColor() {
-		p.Fill.Color = colorSpace.ToLinear(p.Fill.Color)
+	pattern := *p
+	if pattern.Fill.IsGradient() {
+		pattern.Fill.Gradient = pattern.Fill.Gradient.SetColorSpace(colorSpace)
+	} else if pattern.Fill.IsColor() {
+		pattern.Fill.Color = colorSpace.ToLinear(pattern.Fill.Color)
 	}
-	return p
+	return &pattern
 }
 
 // Tile tiles the hatch pattern within the clipping path.

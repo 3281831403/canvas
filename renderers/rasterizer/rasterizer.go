@@ -178,7 +178,7 @@ func (r *Rasterizer) RenderText(text *canvas.Text, m canvas.Matrix) {
 // RenderImage renders an image to the canvas using a transformation matrix.
 func (r *Rasterizer) RenderImage(img image.Image, m canvas.Matrix) {
 	// add transparent margin to image for smooth borders when rotating
-	// TODO: optimize when transformation is only translation or stretch (if optimizing, dont overwrite original img when gamma correcting)
+	// TODO: optimize when transformation is only translation or stretch
 	margin := 0
 	if (m[0][1] != 0.0 || m[1][0] != 0.0) && (m[0][0] != 0.0 || m[1][1] == 0.0) {
 		// only add margin for shear transformation or rotations that are not 90/180/270 degrees
@@ -191,8 +191,9 @@ func (r *Rasterizer) RenderImage(img image.Image, m canvas.Matrix) {
 	}
 
 	if _, ok := r.colorSpace.(canvas.LinearColorSpace); !ok {
-		// gamma decompress
-		changeColorSpace(img.(draw.Image), img, r.colorSpace.ToLinear)
+		// gamma decompress into a copy, never modify the source image so that
+		// repeated renders of the same image give identical results
+		img = toColorSpace(img, r.colorSpace.ToLinear)
 	}
 
 	// draw to destination image

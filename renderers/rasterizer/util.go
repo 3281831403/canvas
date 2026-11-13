@@ -10,6 +10,19 @@ import (
 
 type colorFunc func(color.Color) color.RGBA
 
+// toColorSpace returns a copy of src with the color conversion f applied to every pixel, leaving src untouched. The returned image is opaque to the caller and safe to modify.
+func toColorSpace(src image.Image, f colorFunc) *image.RGBA {
+	bounds := src.Bounds()
+	dst := image.NewRGBA(image.Rect(0, 0, bounds.Dx(), bounds.Dy()))
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			// TODO: parallelize
+			dst.SetRGBA(x-bounds.Min.X, y-bounds.Min.Y, f(src.At(x, y)))
+		}
+	}
+	return dst
+}
+
 func changeColorSpace(dst draw.Image, src image.Image, f colorFunc) {
 	if dstRGBA, ok := dst.(*image.RGBA); ok {
 		for j := 0; j < dst.Bounds().Max.Y; j++ {

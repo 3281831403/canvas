@@ -141,14 +141,16 @@ func (g Grad) ToRadial(c0 Point, r0 float64, c1 Point, r1 float64) *RadialGradie
 	return grad
 }
 
-func (g Grad) SetColorSpace(colorSpace ColorSpace) {
+// SetColorSpace returns a copy of the gradient with its color stops converted to the given color space. The gradient itself is never modified, so that repeated renders give identical results. For the default LinearColorSpace the gradient is returned as-is.
+func (g Grad) SetColorSpace(colorSpace ColorSpace) Grad {
 	if _, ok := colorSpace.(LinearColorSpace); ok {
-		return
+		return g
 	}
-	g = slices.Clone(g)
-	for i := range g {
-		g[i].Color = colorSpace.ToLinear(g[i].Color)
+	linear := slices.Clone(g)
+	for i := range linear {
+		linear[i].Color = colorSpace.ToLinear(linear[i].Color)
 	}
+	return linear
 }
 
 func colorLerp(c0, c1 color.RGBA, t float64) color.RGBA {
@@ -186,10 +188,14 @@ func NewLinearGradient(start, end Point) *LinearGradient {
 	}
 }
 
-// SetColorSpace sets the color space. Automatically called by the rasterizer.
+// SetColorSpace returns a copy of the gradient in the given color space, leaving the gradient itself unmodified. Automatically called by the rasterizer.
 func (g *LinearGradient) SetColorSpace(colorSpace ColorSpace) Gradient {
-	g.Grad.SetColorSpace(colorSpace)
-	return g
+	if _, ok := colorSpace.(LinearColorSpace); ok {
+		return g
+	}
+	grad := *g
+	grad.Grad = g.Grad.SetColorSpace(colorSpace)
+	return &grad
 }
 
 // At returns the color at position (x,y).
@@ -232,10 +238,14 @@ func NewRadialGradient(c0 Point, r0 float64, c1 Point, r1 float64) *RadialGradie
 	}
 }
 
-// SetColorSpace sets the color space. Automatically called by the rasterizer.
+// SetColorSpace returns a copy of the gradient in the given color space, leaving the gradient itself unmodified. Automatically called by the rasterizer.
 func (g *RadialGradient) SetColorSpace(colorSpace ColorSpace) Gradient {
-	g.Grad.SetColorSpace(colorSpace)
-	return g
+	if _, ok := colorSpace.(LinearColorSpace); ok {
+		return g
+	}
+	grad := *g
+	grad.Grad = g.Grad.SetColorSpace(colorSpace)
+	return &grad
 }
 
 // At returns the color at position (x,y).
